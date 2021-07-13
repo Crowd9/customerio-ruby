@@ -150,16 +150,18 @@ describe Customerio::Client do
       time = Time.now.to_i
 
       stub_request(:put, api_uri('/api/v1/customers/5')).with(
-        body: json({
+        body: {
           id: 5,
           email: "customer@example.com",
           created_at: time,
           first_name: "Bob",
-          plan: "basic"
-        })).to_return(status: 200, body: "", headers: {})
+          plan: "basic",
+          anonymous_id: "anon-id"
+        }).to_return(status: 200, body: "", headers: {})
 
       client.identify({
         id: 5,
+        anonymous_id: "anon-id",
         email: "customer@example.com",
         created_at: time,
         first_name: "Bob",
@@ -381,31 +383,35 @@ describe Customerio::Client do
     end
 
     context "tracking an anonymous event" do
+      let(:anon_id) { "anon-id" }
+
       it "sends a POST request to the customer.io's anonymous event API" do
         stub_request(:post, api_uri('/api/v1/events')).
-          with(body: json({ name: "purchase", data: {} })).
+          with(body: { anonymous_id: anon_id, name: "purchase", data: {} }).
           to_return(status: 200, body: "", headers: {})
 
-        client.anonymous_track("purchase")
+        client.track_anonymous(anon_id, "purchase")
       end
 
       it "sends any optional event attributes" do
         stub_request(:post, api_uri('/api/v1/events')).
-          with(body: json({
+          with(body: {
+            anonymous_id: anon_id,
             name: "purchase",
             data: {
               type: "socks",
               price: "13.99"
             }
-          })).
+          }).
           to_return(status: 200, body: "", headers: {})
 
-        client.anonymous_track("purchase", type: "socks", price: "13.99")
+        client.track_anonymous(anon_id, "purchase", type: "socks", price: "13.99")
       end
 
       it "allows sending of a timestamp" do
         stub_request(:post, api_uri('/api/v1/events')).
-          with(body: json({
+          with(body: {
+            anonymous_id: anon_id,
             name: "purchase",
             data: {
               type: "socks",
@@ -413,73 +419,34 @@ describe Customerio::Client do
               timestamp: 1561231234
             },
             timestamp: 1561231234
-          })).
+          }).
           to_return(status: 200, body: "", headers: {})
 
-        client.anonymous_track("purchase", type: "socks", price: "13.99", timestamp: 1561231234)
+        client.track_anonymous(anon_id, "purchase", type: "socks", price: "13.99", timestamp: 1561231234)
       end
-    end
-  end
 
-  describe "#anonymous_track" do
-    it "raises an error if POST doesn't return a 2xx response code" do
-      stub_request(:post, api_uri('/api/v1/events')).
-        with(body: json(name: "purchase", data: {})).
-        to_return(status: 500, body: "", headers: {})
+      it "raises an error if POST doesn't return a 2xx response code" do
+          stub_request(:post, api_uri('/api/v1/events')).
+            with(body: { anonymous_id: anon_id, name: "purchase", data: {} }).
+            to_return(status: 500, body: "", headers: {})
 
-      lambda { client.anonymous_track("purchase") }.should raise_error(Customerio::InvalidResponse)
-    end
+        lambda { client.track_anonymous(anon_id, "purchase") }.should raise_error(Customerio::InvalidResponse)
+      end
 
-    it "throws an error when event_name is missing" do
-      stub_request(:put, /track.customer.io/)
-        .to_return(status: 200, body: "", headers: {})
+      it "throws an error when anonymous_id is missing" do
+          stub_request(:post, api_uri('/api/v1/events')).
+            with(body: { anonymous_id: anon_id, name: "purchase", data: {} }).
+            to_return(status: 500, body: "", headers: {})
 
-      lambda { client.anonymous_track(" ") }.should raise_error(Customerio::Client::ParamError, "event_name must be a non-empty string")
-    end
+        lambda { client.track_anonymous("", "some_event") }.should raise_error(Customerio::Client::ParamError)
+      end
 
-    it "uses the site_id and api key for basic auth and sends the event name" do
-      stub_request(:post, api_uri('/api/v1/events')).
-        with(body: json(name: "purchase", data: {})).
-        to_return(status: 200, body: "", headers: {})
+      it "throws an error when event_name is missing" do
+          stub_request(:post, api_uri('/api/v1/events')).
+            with(body: { anonymous_id: anon_id, name: "purchase", data: {} }).
+            to_return(status: 500, body: "", headers: {})
 
-      client.anonymous_track("purchase")
-    end
-
-    it "sends any optional event attributes" do
-      stub_request(:post, api_uri('/api/v1/events')).
-          with(body: {
-            name: "purchase",
-            data: {
-              type: "socks",
-              price: "27.99"
-            },
-          }).
-
-        to_return(status: 200, body: "", headers: {})
-
-      client.anonymous_track("purchase", type: "socks", price: "27.99")
-    end
-
-    it "allows sending of a timestamp" do
-      stub_request(:post, api_uri('/api/v1/events')).
-          with(body: json({
-            name: "purchase",
-            data: {
-              type: "socks",
-              price: "27.99",
-              timestamp: 1561235678
-            },
-            timestamp: 1561235678
-          })).
-
-        to_return(status: 200, body: "", headers: {})
-
-      client.anonymous_track("purchase", type: "socks", price: "27.99", timestamp: 1561235678)
-    end
-
-    context "too many arguments are passed" do
-      it "throws an error" do
-        lambda { client.anonymous_track("purchase", "text", type: "socks", price: "27.99") }.should raise_error(ArgumentError)
+        lambda { client.track_anonymous(anon_id, "") }.should raise_error(Customerio::Client::ParamError)
       end
     end
   end
@@ -544,6 +511,85 @@ describe Customerio::Client do
 
        lambda { client.delete_device(5, "") }.should raise_error(Customerio::Client::ParamError)
        lambda { client.delete_device(5, nil) }.should raise_error(Customerio::Client::ParamError)
+    end
+  end
+
+  describe "#track_push_notification_event" do
+    attr_accessor :client, :attributes
+
+    before(:each) do
+      @client = Customerio::Client.new("SITE_ID", "API_KEY", :json => true)
+      @attributes = {
+        :delivery_id => 'foo',
+        :device_id => 'bar',
+        :timestamp => Time.now.to_i
+      }
+    end
+
+    it "sends a POST request to customer.io's /push/events endpoint" do
+      stub_request(:post, api_uri('/push/events')).
+        with(
+          :body => json(attributes.merge({
+              :event => 'opened'
+          })),
+          :headers => {
+            'Content-Type' => 'application/json'
+          }).
+        to_return(:status => 200, :body => "", :headers => {})
+
+      client.track_push_notification_event('opened', attributes)
+    end
+
+    it "should raise if event is invalid" do
+      stub_request(:post, api_uri('/push/events')).
+        to_return(:status => 200, :body => "", :headers => {})
+
+      expect {
+        client.track_push_notification_event('closed', attributes.merge({ :delivery_id => nil }))
+      }.to raise_error(Customerio::Client::ParamError, 'event_name must be one of opened, converted, or delivered')
+    end
+
+    it "should raise if delivery_id is invalid" do
+      stub_request(:post, api_uri('/push/events')).
+        to_return(:status => 200, :body => "", :headers => {})
+
+      expect {
+        client.track_push_notification_event('opened', attributes.merge({ :delivery_id => nil }))
+      }.to raise_error(Customerio::Client::ParamError, 'delivery_id must be a non-empty string')
+
+      expect {
+        client.track_push_notification_event('opened', attributes.merge({ :delivery_id => '' }))
+      }.to raise_error(Customerio::Client::ParamError, 'delivery_id must be a non-empty string')
+    end
+
+    it "should raise if device_id is invalid" do
+      stub_request(:post, api_uri('/push/events')).
+        to_return(:status => 200, :body => "", :headers => {})
+
+      expect {
+        client.track_push_notification_event('opened', attributes.merge({ :device_id => nil }))
+      }.to raise_error(Customerio::Client::ParamError, 'device_id must be a non-empty string')
+
+      expect {
+        client.track_push_notification_event('opened', attributes.merge({ :device_id => '' }))
+      }.to raise_error(Customerio::Client::ParamError, 'device_id must be a non-empty string')
+    end
+
+    it "should raise if timestamp is invalid" do
+      stub_request(:post, api_uri('/push/events')).
+        to_return(:status => 200, :body => "", :headers => {})
+
+      expect {
+        client.track_push_notification_event('opened', attributes.merge({ :timestamp => nil }))
+      }.to raise_error(Customerio::Client::ParamError, 'timestamp must be a valid timestamp')
+
+      expect {
+        client.track_push_notification_event('opened', attributes.merge({ :timestamp => 999999999 }))
+      }.to raise_error(Customerio::Client::ParamError, 'timestamp must be a valid timestamp')
+
+      expect {
+        client.track_push_notification_event('opened', attributes.merge({ :timestamp => 100000000000 }))
+      }.to raise_error(Customerio::Client::ParamError, 'timestamp must be a valid timestamp')
     end
   end
 
